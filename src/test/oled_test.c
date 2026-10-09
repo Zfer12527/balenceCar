@@ -1,5 +1,6 @@
 // #include "stm32f10x.h"                  // Device header
 // #include "OLED.h"
+// #include "Delay.h"
 // int main(void)
 // {
 // 	/*模块初始化*/
@@ -16,11 +17,14 @@
 	
 // 	OLED_ShowHexNum(3, 1, 0xAA55, 4);		//3行1列显示十六进制数字0xA5A5，长度为4
 	
-// 	OLED_ShowBinNum(4, 1, 0xAA55, 16);		//4行1列显示二进制数字0xA5A5，长度为16
+// 	// OLED_ShowBinNum(4, 1, 0xAA55, 16);		//4行1列显示二进制数字0xA5A5，长度为16
 // 											//C语言无法直接写出二进制数字，故需要用十六进制表示
-	
+// 	int i=5000;
 // 	while (1)
 // 	{
 		
+// 		//OLED_Clear();
+// 		OLED_ShowNum(4, 1, i++, 10);
+// 		//Delay_ms(100);
 // 	}
 // }

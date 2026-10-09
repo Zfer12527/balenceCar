@@ -22,6 +22,7 @@ targets:
         - USE_STDPERIPH_DRIVER
         - STM32F10X_MD
       incList:
+        - .
         - src
         - lib/cmsis
         - hal/STM32F10x_StdPeriph_Driver
@@ -29,6 +30,7 @@ targets:
         - hal/STM32F10x_StdPeriph_Driver/src
         - src/hardware
         - src/system
+        - src/user
       libList: []
     excludeList:
       - hal/STM32F10x_StdPeriph_Driver/src/stm32f10x_bkp.c
@@ -57,12 +59,9 @@ targets:
         options:
           version: 5
           afterBuildTasks: []
-          asm-compiler:
-            ASM_FLAGS: ""
+          asm-compiler: {}
           beforeBuildTasks: []
           c/cpp-compiler:
-            CXX_FLAGS: ""
-            C_FLAGS: ""
             language-c: c11
             language-cpp: c++11
             one-elf-section-per-data: true
@@ -71,13 +70,16 @@ targets:
             warnings: all-warnings
           global:
             $float-abi-type: softfp
+            arm-thumb-mode: thumb
             misc-control: --specs=nosys.specs --specs=nano.specs
             output-debug-info: enable
           linker:
-            LD_FLAGS: ""
+            $toolName: auto
+            LD_FLAGS: -u _vfprintf
             LIB_FLAGS: -lm
             output-format: elf
             remove-unused-input-sections: true
+            use-float-printf: true
         scatterFilePath: .\stm32f1x_64KB_flash.ld
         storageLayout:
           RAM:
