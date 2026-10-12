@@ -1,5 +1,4 @@
 #include "stm32f10x.h" // Device header
-#define JDBL 9         // 精度倍率
 /**
  * 函    数：PWM初始化
  * 参    数：无
@@ -37,8 +36,8 @@ void PWM_Init(void)
     TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure;                    // 定义结构体变量
     TIM_TimeBaseInitStructure.TIM_ClockDivision     = TIM_CKD_DIV1;       // 时钟分频，选择不分频，此参数用于配置滤波器时钟，不影响时基单元功能
     TIM_TimeBaseInitStructure.TIM_CounterMode       = TIM_CounterMode_Up; // 计数器模式，选择向上计数
-    TIM_TimeBaseInitStructure.TIM_Period            = 100 * JDBL - 1;     // 计数周期，即ARR的值
-    TIM_TimeBaseInitStructure.TIM_Prescaler         = 36 / JDBL - 1;      // 预分频器，即PSC的值
+    TIM_TimeBaseInitStructure.TIM_Period            = 3600 - 1;     // 计数周期，即ARR的值
+    TIM_TimeBaseInitStructure.TIM_Prescaler         = 1 - 1;      // 预分频器，即PSC的值
     TIM_TimeBaseInitStructure.TIM_RepetitionCounter = 0;                  // 重复计数器，高级定时器才会用到
     TIM_TimeBaseInit(TIM1, &TIM_TimeBaseInitStructure);                   // 将结构体变量交给TIM_TimeBaseInit，配置TIM1的时基单元
 
@@ -67,30 +66,34 @@ void PWM_Init(void)
  */
 void PWM_SetMotor(uint8_t MotorNum, float Compare)
 {
-    if (Compare > 100 || Compare < -100 || (MotorNum != 1 && MotorNum != 2)) // 判断输入的值是否在范围内
+    if (Compare > 3600)
     {
-        return; // 若不在范围内，则直接返回
+        Compare = 3600;
+    }
+    if (Compare < -3600)
+    {
+        Compare = -3600;
     }
     if (MotorNum == 1) {
         if (Compare > 0) // 若输入的值小于0，则将其转换为正数
         {
-            GPIO_SetBits(GPIOB, GPIO_Pin_14);
-            GPIO_ResetBits(GPIOB, GPIO_Pin_15);
-            TIM_SetCompare1(TIM1, Compare * JDBL); // 设置CCR1的值pa8
-        } else {
             GPIO_SetBits(GPIOB, GPIO_Pin_15);
             GPIO_ResetBits(GPIOB, GPIO_Pin_14);
-            TIM_SetCompare1(TIM1, -Compare * JDBL); // 设置CCR4的值pa8
+            TIM_SetCompare1(TIM1, Compare); // 设置CCR1的值pa8
+        } else {
+            GPIO_SetBits(GPIOB, GPIO_Pin_14);
+            GPIO_ResetBits(GPIOB, GPIO_Pin_15);
+            TIM_SetCompare1(TIM1, -Compare); // 设置CCR4的值pa8
         }
     } else if (MotorNum == 2) {
         if (Compare > 0) {
             GPIO_SetBits(GPIOB, GPIO_Pin_12);
             GPIO_ResetBits(GPIOB, GPIO_Pin_13);
-            TIM_SetCompare4(TIM1, Compare * JDBL);
+            TIM_SetCompare4(TIM1, Compare);
         } else {
             GPIO_SetBits(GPIOB, GPIO_Pin_13);
             GPIO_ResetBits(GPIOB, GPIO_Pin_12);
-            TIM_SetCompare4(TIM1, -Compare * JDBL); // 设置CCR4的值pa11
+            TIM_SetCompare4(TIM1, -Compare); // 设置CCR4的值pa11
         }
     }
 }

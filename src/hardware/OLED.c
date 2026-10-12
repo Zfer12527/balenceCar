@@ -1,6 +1,6 @@
 #include "stm32f10x.h"
 #include "OLED_Font.h"
-#include "Delay.h"
+// #include "Delay.h"
 
 /*引脚配置*/
 #define OLED_W_SCL(x) GPIO_WriteBit(GPIOB, GPIO_Pin_5, (BitAction)(x))
@@ -21,7 +21,7 @@ void OLED_I2C_Init(void)
     GPIO_Init(GPIOB, &GPIO_InitStructure);
 
     OLED_W_SCL(1);
-    Delay_ms(1);
+    // Delay_ms(1);
     OLED_W_SDA(1);
 }
 

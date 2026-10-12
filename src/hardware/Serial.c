@@ -29,7 +29,7 @@ void Serial_Init(void)
 
     /*USART初始化*/
     USART_InitTypeDef USART_InitStructure;                                          // 定义结构体变量
-    USART_InitStructure.USART_BaudRate            = 115200;                         // 波特率
+    USART_InitStructure.USART_BaudRate            = 9600;                         // 波特率
     USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None; // 硬件流控制，不需要
     USART_InitStructure.USART_Mode                = USART_Mode_Tx | USART_Mode_Rx;  // 模式，选择为发送模式
     USART_InitStructure.USART_Parity              = USART_Parity_No;                // 奇偶校验，不需要
@@ -186,15 +186,13 @@ void dealData2(uint8_t RxData)
         }
     } else if (RxState == 1) {
         if (RxData == ']') {
-            RxState = 2;
+            RxState                    = 0;
+        Serial_RxPacket[pRxPacket] = '\0';
+        Serial_RxFlag              = 1;
         } else {
             Serial_RxPacket[pRxPacket] = RxData;
             pRxPacket++;
         }
-    } else if (RxState == 2) {
-        RxState                    = 0;
-        Serial_RxPacket[pRxPacket] = '\0';
-        Serial_RxFlag              = 1;
     }
 }
 void USART3_IRQHandler(void)

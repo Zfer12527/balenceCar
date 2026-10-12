@@ -8,7 +8,7 @@ typedef struct {
 
     float Target;
     float Actual;
-    float out;
+    float Out;
 
     float Error0;
     float Error1;
@@ -16,6 +16,9 @@ typedef struct {
 
     float OutMax;
     float OutMin;
+
+    float ErrorIntAbsMax; // 积分项绝对值最大值
+    float EnableIntErrorValue; // 允许积分的误差值范围，超过这个范围就不进行积分
 } PID_t;
 void PID_Update(PID_t *p);
 #endif
