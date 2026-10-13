@@ -10,9 +10,11 @@
 #include "string.h"
 #include "stdlib.h"
 #include "Encoder.h"
+#include "HCSR04.h"
 #define M_PI 3.14159
 char strArray[20];
 uint16_t execTime;
+uint16_t distance;
 int16_t AX, AY, AZ, GX, GY, GZ;
 float Angle;
 float AngleAcc;
@@ -44,8 +46,8 @@ PID_t SpeedPID = {
     .Kp                  = 2.0,
     .Ki                  = 0.05, // 速度环用PI，积分从小往大调
     .Kd                  = 0.0,
-    .OutMax              = 30, // 输出到角度环
-    .OutMin              = -30,
+    .OutMax              = 20.0, // 输出到角度环
+    .OutMin              = -20.0,
     .ErrorIntAbsMax      = 10,
     .EnableIntErrorValue = 10};
 
@@ -73,9 +75,11 @@ void showSomething(void)
     OLED_ShowSignedNum(1, 1, execTime, 6);
     sprintf(strArray, "kp%.2f", TurnPID.Kp);
     OLED_ShowString(2, 1, strArray);
-    sprintf(strArray, "ki%.2f", TurnPID.Ki);
-    OLED_ShowString(3, 1, strArray);
-    sprintf(strArray, "kd%.2f", TurnPID.Kd);
+    // sprintf(strArray, "distance%d", distance);
+    OLED_ShowNum(3, 1, distance, 8);
+    // sprintf(strArray, "kd%.2f", TurnPID.Kd);
+    // OLED_ShowString(4, 1, strArray);
+    sprintf(strArray, "spmax%.2f", SpeedPID.OutMax);
     OLED_ShowString(4, 1, strArray);
     // Serial_Printf("[plot,%f,%f,%f]", AnglePID.Target, AnglePID.Actual, AnglePID.Error0, AnglePID.Ki * AnglePID.ErrorInt);
     // Serial_Printf("[plot,%f,%f,%f,%f]", SpeedPID.Target, SpeedPID.Actual, SpeedPID.Error0, SpeedPID.Ki * SpeedPID.ErrorInt);
@@ -158,6 +162,7 @@ int main(void)
 {
     OLED_Init();
     MPU6050_Init();
+    HCSR04_Init();
     Encoder_Init();
     PWM_Init();
     Serial_Init();
@@ -172,8 +177,7 @@ void TIM2_IRQHandler(void)
 {
     static uint16_t startTime;
 
-    static uint8_t pid_count;
-    static uint8_t pid_count2;
+    static uint8_t pid_count,pid_count2,pid_count3;
 
     if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET) // Check if the update interrupt flag is set
     {
@@ -224,6 +228,15 @@ void TIM2_IRQHandler(void)
                 DiffPWM = TurnPID.Out;
 
                 execTime = TIM_GetCounter(TIM2) - startTime;
+            }
+        }
+        if (++pid_count3 >= 100) {
+            pid_count3 = 0;
+            distance = HCSR04_MeasureCm();
+            if(distance > 0 &&distance < 20) {
+                SpeedPID.OutMax = 0;
+            }else if(distance >= 20 && distance <= 100) {
+                SpeedPID.OutMax = (20.0f/(80*80))*(distance-20)*(distance-20); // 恢复正常速度
             }
         }
     }

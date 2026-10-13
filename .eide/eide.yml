@@ -80,7 +80,7 @@ targets:
             output-format: elf
             remove-unused-input-sections: true
             use-float-printf: true
-        scatterFilePath: .\stm32f1x_64KB_flash.ld
+        scatterFilePath: C:\dev\code\balenceCar\stm32f1x_64KB_flash.ld
         storageLayout:
           RAM:
             - id: 1
