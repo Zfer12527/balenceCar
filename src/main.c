@@ -8,6 +8,7 @@
 #include "Encoder.h" // 引入轮速采样
 #include "HCSR04.h" // 引入 PA3/PA1 非阻塞测距
 #include "Avoidance.h" // 引入二十厘米避障策略
+#include "StopRamp.h" // 引入普通松手0.5 秒平滑减速曲线
 #include <math.h> // 引入角度和有限数值计算
 #include <string.h> // 引入字段解析与接收快照
 #include <stdlib.h> // 引入数值转换
@@ -22,6 +23,7 @@ static float angleOffset = 1.0f; // 保留当前代码的机械偏角初值
 static float angleTargetRaw; // 保留原有 AngleTarget 参数接收兼容
 static float angle; // 保存融合角度
 static float differentialPwm; // 保存差速环输出
+static StopRamp stopRamp; // 保存本次松手减速状态
 static PID_t anglePid = {.Kp=120.0f, .Ki=4.0f, .Kd=120.0f, .OutMax=3000.0f, .OutMin=-3000.0f, .ErrorIntAbsMax=1000.0f, .EnableIntErrorValue=10.0f}; // 保留恢复后代码的直立环配置
 static PID_t speedPid = {.Kp=2.0f, .Ki=0.05f, .Kd=0.0f, .OutMax=20.0f, .OutMin=-20.0f, .ErrorIntAbsMax=10.0f, .EnableIntErrorValue=10.0f}; // 保留速度环对称输出限幅
 static PID_t turnPid = {.Kp=50.0f, .Ki=90.0f, .Kd=0.0f, .OutMax=1200.0f, .OutMin=-1200.0f, .ErrorIntAbsMax=1200.0f, .EnableIntErrorValue=1200.0f}; // 保留方向环配置
@@ -33,6 +35,7 @@ static void StopControl(void) // 在停机或倾倒时清除旧命令
 { // 开始停机
     runFlag = 0; // 禁止继续运行
     speedRequest = turnRequest = 0.0f; // 丢弃停机前的运动命令
+    StopRamp_Cancel(&stopRamp); // 明确关闭或倾倒时不继续执行减速曲线
     ResetPid(&anglePid); // 清除直立环旧状态
     ResetPid(&speedPid); // 清除速度环旧状态
     ResetPid(&turnPid); // 清除方向环旧状态
@@ -44,9 +47,18 @@ static void StopControl(void) // 在停机或倾倒时清除旧命令
 static void ApplyMotionTargets(void) // 统一应用摇杆请求和距离约束
 { // 开始目标更新
     float target = Avoidance_Target(speedRequest, distance, obstacleStopCm); // 使用当前阈值限制前进并保留后退
-    if (speedRequest > 0.0f && target == 0.0f) speedRequest = 0.0f; // 取消被拦截的旧前进请求以免障碍消失后自动恢复
-    if (speedPid.Target != 0.0f && target == 0.0f) speedPid.ErrorInt = 0.0f; // 进入制动时去掉旧运动积分，保留速度反馈制动
-    speedPid.Target = target; // 直接设置期望速度而不破坏速度环输出上下限
+    uint8_t forwardBlocked = Avoidance_Target(1.0f, distance, obstacleStopCm) == 0.0f; // 同时检查松手减速期间的前方限制
+    if ((speedRequest > 0.0f && target == 0.0f) || (forwardBlocked && speedRequest == 0.0f && speedPid.Target > 0.0f)) { // 新出现障碍时不等待普通减速完成
+        speedRequest = 0.0f; // 取消旧前进请求以免障碍消失后自动恢复
+        StopRamp_Cancel(&stopRamp); // 避障制动优先于普通0.5 秒曲线
+        speedPid.Target = 0.0f; // 立即给速度环零目标并继续保持平衡制动
+    } else if (target != 0.0f) { // 用户重新推动摇杆时立即接管
+        StopRamp_Cancel(&stopRamp); // 不复用上一次松手起点
+        speedPid.Target = target; // 允许明确的新前进、后退和换向指令
+    } else { // 普通松手时沿固定的0.5 秒曲线减速
+        speedPid.Target = StopRamp_Target(&stopRamp, speedPid.Target, milliseconds); // 每次按真实经过时间计算且重复零值帧不延长停车
+    } // 结束速度目标选择
+    // 松手及避障均保留速度环积分的连续性，只有明确停机才整体清理控制状态。
     turnPid.Target = turnRequest; // 方向归零始终生效
 } // 结束目标更新
 static void UpdateAttitude(void) // 每十毫秒采样与融合姿态
@@ -145,15 +157,14 @@ static void PollCommands(void) // 在前台解析当前固件支持的方括号�
         __set_PRIMASK(mask); // 恢复原中断状态
     } // 结束命令分派
 } // 结束前台命令处理
-static void SendSpeedIntegralPlot(void) // 在前台发送速度环积分的两个实时通道
-{ // 开始积分快照
+static void SendSpeedTargetPlot(void) // 保留当前用于观察目标速度的单通道调试输出
+{ // 开始目标速度快照
     uint32_t mask = __get_PRIMASK(); // 保存原中断状态
-    __disable_irq(); // 保证积分值和积分增益来自同一时刻
-    float integral = speedPid.ErrorInt; // 获取速度环原始积分累积值
-    float integralOutput = speedPid.Ki * integral; // 获取积分项实际贡献
+    __disable_irq(); // 保证读取的目标速度完整一致
+    float target = speedPid.Target; // 复制当前平滑减速后的速度目标
     __set_PRIMASK(mask); // 在格式化和串口发送前恢复平衡控制中断
-    Serial_Printf("[plot,%f]", speedPid.Target); // 按原始积分、积分输出的顺序发送且不追加换行
-} // 结束积分发送
+    Serial_Printf("[plot,%f]", (double)target); // 保留用户当前单通道格式并用于检查0.5 秒内是否跨零
+} // 结束目标速度发送
 static void RefreshDisplay(void) // 每一百毫秒刷新状态而不在控制中断中发送调试文本
 { // 开始状态显示
     uint32_t mask = __get_PRIMASK(); // 保存原中断状态
@@ -192,7 +203,7 @@ int main(void) // 初始化硬件并执行前台任务
         if ((uint32_t)(now - lastDisplay) >= 100U) { // 将显示和积分发送限制为每秒十次
             lastDisplay = now; // 保存本轮发送起点以避免积压补发
             RefreshDisplay(); // 刷新当前状态
-            SendSpeedIntegralPlot(); // 在前台发送当前速度环积分，控制中断仍可抢占
+            SendSpeedTargetPlot(); // 在前台发送速度目标，控制中断仍可抢占
         } // 结束前台周期任务
     } // 结束前台循环
 } // 结束主入口
