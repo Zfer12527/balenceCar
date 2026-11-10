@@ -201,7 +201,7 @@ void USART3_IRQHandler(void)
     if (USART_GetITStatus(USART3, USART_IT_RXNE) == SET) {
 
         uint8_t RxData = USART_ReceiveData(USART3);
-        Serial_SendByte(RxData);
+        // 不在接收中断中逐字节回显，以免回显插入前台的 plot 帧并阻塞控制。
         dealData2(RxData);
         // USART_ClearITPendingBit(USART3, USART_IT_RXNE);
     }

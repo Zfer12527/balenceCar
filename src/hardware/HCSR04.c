@@ -1,196 +1,102 @@
-#include "stm32f10x.h"
-#include <stdbool.h>
-#define HCSR04_TRIG_PORT      GPIOA
-#define HCSR04_TRIG_PIN       GPIO_Pin_3
-#define HCSR04_ECHO_PORT      GPIOA
-#define HCSR04_ECHO_PIN       GPIO_Pin_1
-// 时序参数（单位：微秒）
-#define HCSR04_TRIG_WIDTH_US  12U     // 触发脉冲宽度（原厂要求≥10us，留2us余量）
-#define HCSR04_INTERVAL_US    60000U  // 两次测量最小间隔，避免余波干扰
-#define HCSR04_ECHO_TIMEOUT_US 30000U // 回波总超时，对应最大约5m量程
-
-// 量程对应回波时间（单位：微秒）
-#define HCSR04_MIN_ECHO_US    116U    // 最小量程2cm对应回波时间
-#define HCSR04_MAX_ECHO_US    23200U  // 最大量程4m对应回波时间
-
-// 距离计算整数系数（声速340m/s，往返路程，近似公式：mm = (us*10 +29)/58）
-#define HCSR04_DIST_NUM       10U
-#define HCSR04_DIST_DEN       58U
-#define HCSR04_DIST_ROUND     29U
-/************************  类型定义  ************************/
-typedef enum {
-    HCSR04_OK = 0,          // 测量成功
-    HCSR04_ERR_TIMER,       // DWT定时器未就绪
-    HCSR04_ERR_ECHO_BUSY,   // 测量前ECHO已为高（引脚故障/模块忙）
-    HCSR04_ERR_NO_ECHO,     // 未检测到回波上升沿
-    HCSR04_ERR_ECHO_TIMEOUT,// 回波高电平持续超时
-    HCSR04_ERR_OUT_OF_RANGE // 结果超出有效量程
-} HCSR04_Status_t;
-
-// 传感器实例结构体：聚合所有相关变量，减少零散全局变量
-typedef struct {
-    HCSR04_Status_t status; // 最新测量状态
-    uint32_t echo_us;       // 回波高电平时长（微秒）
-    uint32_t distance_mm;   // 测量距离（毫米，整数运算无精度损失）
-    uint32_t cycles_per_us; // 每微秒对应的内核时钟周期数
-    uint32_t last_trig_cyc; // 上一次触发的CYCCNT值
-    bool timer_ready;       // DWT定时器就绪标志
-    bool has_triggered;     // 是否已执行过触发（用于间隔控制）
-} HCSR04_HandleTypeDef;
-
-/************************  内部静态变量与辅助函数  ************************/
-static HCSR04_HandleTypeDef hcsr04;
-// 计算从start到当前的周期数（32位无符号减法自动处理溢出）
-static uint32_t elapsed_cycles(uint32_t start)
-{
-    return (uint32_t)(DWT->CYCCNT - start);
-}
-
-// 微秒级阻塞延时
-static void wait_us(uint32_t us)
-{
-    uint32_t start = DWT->CYCCNT;
-    uint32_t total_cyc = us * hcsr04.cycles_per_us;
-    while (elapsed_cycles(start) < total_cyc);
-}
-
-// 等待ECHO引脚达到指定电平，超时返回false
-static bool wait_echo_level(bool target_level, uint32_t timeout_cyc)
-{
-    uint32_t start = DWT->CYCCNT;
-    GPIO_TypeDef *port = HCSR04_ECHO_PORT;
-    uint16_t pin = HCSR04_ECHO_PIN;
-
-    while (1) {
-        bool current = (port->IDR & pin) != 0U;
-        if (current == target_level) return true;
-        if (elapsed_cycles(start) >= timeout_cyc) return false;
-    }
-}
-
-// 发送一次触发脉冲
-static void send_trigger(void)
-{
-    GPIO_ResetBits(HCSR04_TRIG_PORT, HCSR04_TRIG_PIN);
-    wait_us(2);
-    GPIO_SetBits(HCSR04_TRIG_PORT, HCSR04_TRIG_PIN);
-    wait_us(HCSR04_TRIG_WIDTH_US);
-    GPIO_ResetBits(HCSR04_TRIG_PORT, HCSR04_TRIG_PIN);
-
-    hcsr04.last_trig_cyc = DWT->CYCCNT;
-    hcsr04.has_triggered = true;
-}
-void HCSR04_Init(void)
-{
-    GPIO_InitTypeDef gpio_cfg;
-    uint32_t test_start;
-
-    // 初始化句柄默认值
-    hcsr04.status        = HCSR04_ERR_TIMER;
-    hcsr04.echo_us       = 0;
-    hcsr04.distance_mm   = 0;
-    hcsr04.timer_ready   = false;
-    hcsr04.has_triggered = false;
-
-    // 计算时钟基准
-    SystemCoreClockUpdate();
-    hcsr04.cycles_per_us = SystemCoreClock / 1000000U;
-
-    // 开启GPIO时钟
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-
-    // TRIG引脚：推挽输出，初始低电平
-    GPIO_StructInit(&gpio_cfg);
-    gpio_cfg.GPIO_Pin   = HCSR04_TRIG_PIN;
-    gpio_cfg.GPIO_Mode  = GPIO_Mode_Out_PP;
-    gpio_cfg.GPIO_Speed = GPIO_Speed_2MHz;
-    GPIO_Init(HCSR04_TRIG_PORT, &gpio_cfg);
-    GPIO_ResetBits(HCSR04_TRIG_PORT, HCSR04_TRIG_PIN);
-
-    // ECHO引脚：下拉输入，确保空闲电平稳定
-    gpio_cfg.GPIO_Pin  = HCSR04_ECHO_PIN;
-    gpio_cfg.GPIO_Mode = GPIO_Mode_IPD;
-    GPIO_Init(HCSR04_ECHO_PORT, &gpio_cfg);
-
-    // 使能DWT周期计数器
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    __DSB();
-    __ISB();
-
-    // 校验DWT是否正常运行
-    test_start = DWT->CYCCNT;
-    for (uint8_t i = 0; i < 16; i++) __NOP();
-
-    if (hcsr04.cycles_per_us != 0U && DWT->CYCCNT != test_start) {
-        hcsr04.timer_ready = true;
-        hcsr04.status      = HCSR04_OK;
-    }
-}
-// 执行一次测量，返回状态码；结果存在hcsr04结构体中
-HCSR04_Status_t HCSR04_Measure(void)
-{
-    uint32_t rise_cyc;
-    uint32_t timeout_cyc = HCSR04_ECHO_TIMEOUT_US * hcsr04.cycles_per_us;
-
-    hcsr04.echo_us = 0;
-    hcsr04.distance_mm = 0;
-
-    // 1. 定时器就绪检查
-    if (!hcsr04.timer_ready) {
-        hcsr04.status = HCSR04_ERR_TIMER;
-        return hcsr04.status;
-    }
-
-    // 2. 强制保证两次触发最小间隔
-    if (hcsr04.has_triggered) {
-        uint32_t interval_cyc = HCSR04_INTERVAL_US * hcsr04.cycles_per_us;
-        while (elapsed_cycles(hcsr04.last_trig_cyc) < interval_cyc);
-    }
-
-    // 3. 检查ECHO是否空闲
-    if (!wait_echo_level(false, timeout_cyc)) {
-        hcsr04.status = HCSR04_ERR_ECHO_BUSY;
-        return hcsr04.status;
-    }
-
-    // 4. 发送触发脉冲
-    send_trigger();
-
-    // 5. 等待回波上升沿
-    if (!wait_echo_level(true, timeout_cyc)) {
-        hcsr04.status = HCSR04_ERR_NO_ECHO;
-        return hcsr04.status;
-    }
-    rise_cyc = DWT->CYCCNT;
-
-    // 6. 等待回波下降沿
-    if (!wait_echo_level(false, timeout_cyc)) {
-        hcsr04.status = HCSR04_ERR_ECHO_TIMEOUT;
-        return hcsr04.status;
-    }
-
-    // 7. 计算回波时长（四舍五入到微秒）
-    uint32_t pulse_cyc = elapsed_cycles(rise_cyc);
-    hcsr04.echo_us = (pulse_cyc + hcsr04.cycles_per_us / 2U) / hcsr04.cycles_per_us;
-
-    // 8. 量程校验
-    if (hcsr04.echo_us < HCSR04_MIN_ECHO_US || hcsr04.echo_us > HCSR04_MAX_ECHO_US) {
-        hcsr04.status = HCSR04_ERR_OUT_OF_RANGE;
-        return hcsr04.status;
-    }
-
-    // 9. 整数运算计算距离（毫米），完全避免浮点开销
-    hcsr04.distance_mm = (hcsr04.echo_us * HCSR04_DIST_NUM + HCSR04_DIST_ROUND) / HCSR04_DIST_DEN;
-    hcsr04.status = HCSR04_OK;
-
-    return hcsr04.status;
-}
-// 兼容原有接口：返回厘米浮点值，失败返回-1
-uint16_t HCSR04_MeasureCm(void)
-{
-    if (HCSR04_Measure() != HCSR04_OK) {
-        return 0;
-    }
-    return hcsr04.distance_mm / 10;
-}
+#include "stm32f10x.h" // 引入引脚、外部中断和内核计时
+#include "HCSR04.h" // 引入测距接口
+enum { IDLE, WAIT_RISE, WAIT_FALL }; // 定义非阻塞测量状态
+static volatile uint8_t state; // 与边沿中断共享测量状态
+static volatile uint32_t riseCycles; // 保存回波上升沿时间
+static volatile uint16_t distanceCm; // 保存最新完整测量结果
+static volatile uint32_t resultCycles; // 保存结果更新时间
+static uint32_t cyclesPerUs; // 内核周期到微秒的换算系数
+static uint32_t triggerCycles; // 保存最近一次触发时间
+static uint8_t clockReady; // 标记计时器可用
+static void WaitUs(uint32_t microseconds) // 仅用于产生短触发脉冲
+{ // 开始短延时
+    uint32_t start = DWT->CYCCNT; // 保存周期起点
+    while ((uint32_t)(DWT->CYCCNT - start) < microseconds * cyclesPerUs) { __NOP(); } // 兼容计数回绕
+} // 结束短延时
+void HCSR04_Init(void) // 初始化超声波硬件
+{ // 开始硬件初始化
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE); // 开启引脚与边沿映射时钟
+    GPIO_InitTypeDef gpio; // 定义引脚配置
+    GPIO_StructInit(&gpio); // 初始化全部配置字段
+    gpio.GPIO_Pin = GPIO_Pin_3; // TRIG 使用 PA3
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP; // 触发使用推挽输出
+    gpio.GPIO_Speed = GPIO_Speed_2MHz; // 设置触发引脚速度
+    GPIO_Init(GPIOA, &gpio); // 应用触发引脚配置
+    GPIO_ResetBits(GPIOA, GPIO_Pin_3); // 保证初始触发电平为低
+    gpio.GPIO_Pin = GPIO_Pin_1; // ECHO 使用 PA1
+    gpio.GPIO_Mode = GPIO_Mode_IPD; // 使用下拉输入避免空闲悬空
+    GPIO_Init(GPIOA, &gpio); // 应用回波引脚配置
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; // 开启内核调试计时资源
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // 启动周期计时但不清除共享计数
+    __DSB(); // 确保计数器配置完成
+    __ISB(); // 同步后续指令
+    cyclesPerUs = SystemCoreClock / 1000000U; // 按实际内核频率换算
+    uint32_t probe = DWT->CYCCNT; // 保存计数探测起点
+    for (unsigned i = 0; i < 16; ++i) __NOP(); // 留出足够计数推进时间
+    clockReady = cyclesPerUs != 0U && DWT->CYCCNT != probe; // 检查周期计数确实工作
+    state = IDLE; // 初始化测量状态
+    distanceCm = 0; // 上电没有有效测距
+    triggerCycles = DWT->CYCCNT - 60000U * cyclesPerUs; // 允许第一次调度立即触发
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1); // 将 PA1 连接到 EXTI1
+    EXTI_InitTypeDef exti; // 定义外部中断配置
+    EXTI_StructInit(&exti); // 初始化全部配置字段
+    exti.EXTI_Line = EXTI_Line1; // 选择回波对应的中断线
+    exti.EXTI_Mode = EXTI_Mode_Interrupt; // 使用中断而非轮询等待
+    exti.EXTI_Trigger = EXTI_Trigger_Rising_Falling; // 捕获回波上升沿和下降沿
+    exti.EXTI_LineCmd = ENABLE; // 开启边沿捕获
+    EXTI_ClearITPendingBit(EXTI_Line1); // 清除初始化残留事件
+    EXTI_Init(&exti); // 应用边沿配置
+    NVIC_InitTypeDef irq = {EXTI1_IRQn, 0, 0, ENABLE}; // 让时间戳采样高于控制与串口中断
+    NVIC_Init(&irq); // 开启回波中断入口
+} // 结束硬件初始化
+void HCSR04_Tick(void) // 推进测量而不等待回波
+{ // 开始测量调度
+    if (!clockReady) return; // 计时无效时保持无效距离
+    uint32_t now = DWT->CYCCNT; // 读取实际经过的时间
+    uint32_t mask = __get_PRIMASK(); // 保存原中断状态
+    __disable_irq(); // 原子检查超时，避免覆盖刚完成的边沿结果
+    if (state != IDLE && (uint32_t)(now - triggerCycles) >= 30000U * cyclesPerUs) { // 最多等待三十毫秒回波
+        state = IDLE; // 超时后结束当前测量
+        distanceCm = 0; // 不继续沿用旧的远距离结果
+    } // 结束超时处理
+    uint8_t ready = state == IDLE && (uint32_t)(now - triggerCycles) >= 60000U * cyclesPerUs; // 两次触发至少间隔六十毫秒
+    if (ready) { // 准备发起新测量
+        triggerCycles = now; // 保存触发时刻
+        if (GPIOA->IDR & GPIO_Pin_1) distanceCm = 0; // 回波持续高电平时判定当前不可测量
+        else state = WAIT_RISE; // 在触发前准备好上升沿接收
+    } // 结束测量准备
+    uint8_t trigger = ready && state == WAIT_RISE; // 保存是否需要触发
+    __set_PRIMASK(mask); // 在发送脉冲前恢复边沿中断
+    if (!trigger) return; // 当前没有新的触发任务
+    GPIO_ResetBits(GPIOA, GPIO_Pin_3); // 确保触发前为低电平
+    WaitUs(2); // 保持触发前的低电平
+    GPIO_SetBits(GPIOA, GPIO_Pin_3); // 开始触发高电平
+    WaitUs(12); // 满足模块要求的触发脉宽
+    GPIO_ResetBits(GPIOA, GPIO_Pin_3); // 结束触发并交由边沿中断接收
+} // 结束测量调度
+void EXTI1_IRQHandler(void) // 捕获精确的回波边沿
+{ // 开始边沿处理
+    if (EXTI_GetITStatus(EXTI_Line1) == RESET) return; // 忽略非回波事件
+    EXTI_ClearITPendingBit(EXTI_Line1); // 先清事件以捕获下一边沿
+    uint32_t now = DWT->CYCCNT; // 立即读取边沿时间戳
+    if (state == WAIT_RISE && (GPIOA->IDR & GPIO_Pin_1)) { // 收到期待的上升沿
+        riseCycles = now; // 保存高电平起点
+        state = WAIT_FALL; // 等待高电平结束
+    } else if (state == WAIT_FALL && !(GPIOA->IDR & GPIO_Pin_1)) { // 收到期待的下降沿
+        uint32_t microseconds = (now - riseCycles) / cyclesPerUs; // 换算回波高电平宽度
+        distanceCm = microseconds >= 116U && microseconds <= 23200U ? (uint16_t)(microseconds / 58U) : 0; // 校验量程并向下取整厘米
+        resultCycles = now; // 更新结果时效
+        state = IDLE; // 完成一次测量
+    } // 结束边沿分派
+} // 结束边沿处理
+uint16_t HCSR04_GetDistanceCm(void) // 读取一致且尚未过期的测量结果
+{ // 开始距离快照
+    uint32_t mask = __get_PRIMASK(); // 保存原中断状态
+    __disable_irq(); // 防止结果与时间戳来自不同测量
+    uint16_t value = distanceCm; // 复制距离
+    uint32_t timestamp = resultCycles; // 复制结果时间
+    __set_PRIMASK(mask); // 恢复原中断状态
+    if (!clockReady || (uint32_t)(DWT->CYCCNT - timestamp) > 120000U * cyclesPerUs) return 0; // 超过一百二十毫秒的旧结果视为无效
+    return value; // 返回有效厘米数
+} // 结束距离快照
+uint16_t HCSR04_MeasureCm(void) { return HCSR04_GetDistanceCm(); } // 保留旧名称但不阻塞控制中断
